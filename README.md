@@ -12,7 +12,7 @@ The agent gets one tool, `schedule`, with three actions.
 
 | Action | Fields |
 | --- | --- |
-| `add` | `prompt` plus one of `in` (`30m`), `at` (`2026-11-01T09:00`), `every` (`10m`, at least 1 minute) or `cron` (`0 9 * * 1-5`). Optional: `max`, `if`, `detached`. |
+| `add` | `prompt` plus one of `in` (`30m`), `at` (`2026-11-01T09:00`), `every` (`10m`, at least 1 minute) or `cron` (`0 9 * * 1-5`). Optional: `max`, `if`, `urgent`, `detached`. |
 | `list` | Shows in-session timers and detached jobs. |
 | `cancel` | `id` (in-session), a detached job name, or `all`. |
 
@@ -28,7 +28,7 @@ You get these commands:
 
 ## How it works
 
-In-session timers are kept in the session file. They come back when you resume the session and only fire while pi is running. If the agent is busy when a timer is due, the prompt waits as a follow-up message, so it never interrupts work. Runs missed while pi was closed are merged into one run. The status line shows `⏱ N` while timers are active.
+In-session timers are kept in the session file. They come back when you resume the session and only fire while pi is running. A due prompt waits until the conversation is quiet: the agent is idle, nothing is queued, and there has been no message from you and no reply from the agent for 1 minute. So a timer never cuts into a conversation; during a long session it just waits. Set `urgent: true` on a job to skip the wait (it then queues as a follow-up if the agent is busy). Runs missed while pi was closed are merged into one run. The status line shows `⏱ N` while timers are active.
 
 **`if` (optional).** A shell command that runs first, in the session folder. The agent is woken only when the command exits 0, and its output is added to the prompt. This keeps polling cheap, because the model only runs when something changed. A wait-until job is `every` + `if` + `max: 1`.
 
