@@ -1,0 +1,15 @@
+{
+  "name": "pi-simple-scheduler",
+  "version": "0.1.0",
+  "description": "Let pi schedule its own prompts: one-shot wakes, loops, cron, optional shell check, optional systemd jobs that run with pi closed. One file.",
+  "license": "MIT",
+  "type": "module",
+  "keywords": ["pi-package", "pi-extension", "scheduler", "cron", "loop", "timer"],
+  "repository": { "type": "git", "url": "https://github.com/kestermcullough/pi-simple-scheduler.git" },
+  "peerDependencies": {
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-coding-agent": "*",
+    "typebox": "*"
+  },
+  "pi": { "extensions": ["./index.ts"] }
+}

@@ -1,0 +1,44 @@
+# pi-simple-scheduler
+
+A [pi](https://github.com/earendil-works/pi) extension that lets the agent (or you) schedule prompts for later. It is one file of about 260 lines and has no dependencies.
+
+```bash
+pi install git:github.com/kestermcullough/pi-simple-scheduler
+```
+
+## What it does
+
+The agent gets one tool, `schedule`, with three actions.
+
+| Action | Fields |
+| --- | --- |
+| `add` | `prompt` plus one of `in` (`30m`), `at` (`2026-11-01T09:00`), `every` (`10m`, at least 1 minute) or `cron` (`0 9 * * 1-5`). Optional: `max`, `if`, `detached`. |
+| `list` | Shows in-session timers and detached jobs. |
+| `cancel` | `id` (in-session), a detached job name, or `all`. |
+
+You get these commands:
+
+```text
+/loop 10m check the build
+/loop "0 9 * * 1-5" summarize new issues
+/remind 30m look at the deploy again
+/timers
+/untimer 2        (or a detached name, or all)
+```
+
+## How it works
+
+In-session timers are kept in the session file. They come back when you resume the session and only fire while pi is running. If the agent is busy when a timer is due, the prompt waits as a follow-up message, so it never interrupts work. Runs missed while pi was closed are merged into one run. The status line shows `⏱ N` while timers are active.
+
+**`if` (optional).** A shell command that runs first, in the session folder. The agent is woken only when the command exits 0, and its output is added to the prompt. This keeps polling cheap, because the model only runs when something changed. A wait-until job is `every` + `if` + `max: 1`.
+
+**`detached` (optional).** Creates a systemd user timer in `~/.config/systemd/user/pi-sched-*.timer`. When it fires, it runs `pi -p "<prompt>"` as a new session in the same folder, even if pi is closed. Output goes to `~/.pi/agent/scheduler/<name>.log`. One-shot jobs remove themselves after they run. Calendar jobs use `Persistent=true`, so a run that was missed while the machine was off happens at the next start. This needs Linux with systemd (WSL with `systemd=true` works). Run `loginctl enable-linger $USER` so jobs fire without a login. `max` is not supported for detached jobs.
+
+**Self-paced loops.** The agent schedules a one-shot `in` at the end of each run and picks the delay itself.
+
+## Notes
+
+- Times are local. Cron has 5 fields and supports `*`, `,`, `-` and `/`.
+- There are no tests, on purpose. The code is short enough to read.
+
+MIT license.
