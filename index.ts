@@ -214,7 +214,9 @@ export default function (pi: ExtensionAPI) {
 			"Optional: max (number of runs); if (shell command run first, wake only when it exits 0, its output is appended); " +
 			"detached (true = systemd timer that runs `pi -p` in a fresh session here, even with pi closed). " +
 			"list: show timers. cancel: id, detached name, or 'all'. " +
-			"For a self-paced loop, schedule a one-shot 'in' at the end of each run. For wait-until, use every + if + max 1.",
+			"For a self-paced loop, schedule a one-shot 'in' at the end of each run. For wait-until, use every + if + max 1. " +
+			"Clean up after yourself: when the job a loop was for is done, cancel it. Never leave loops or detached jobs running " +
+			"with nothing left to do; prefer max or a one-shot over open-ended loops.",
 		parameters: Type.Object({
 			action: StringEnum(["add", "list", "cancel"] as const),
 			prompt: Type.Optional(Type.String()),
