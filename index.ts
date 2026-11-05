@@ -10,6 +10,7 @@
  * In-session timers are saved in the session, come back on /resume, and only fire while pi runs.
  * A due prompt waits until the conversation is quiet: agent idle, nothing queued, and no message from you or
  * reply from the agent for 1 minute. `urgent` jobs skip the wait and queue as a follow-up if the agent is busy.
+ * `fresh` jobs run `pi -p` with a clean context in the background and only report back if the answer is not NOTHING.
  * Detached jobs are systemd user timers that run `pi -p` as a new session in the same folder.
  */
 import { exec, execFileSync } from "node:child_process";
@@ -20,9 +21,9 @@ import { StringEnum } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 
-type Job = { id: number; prompt: string; next: number; every?: number; cron?: string; if?: string; urgent?: boolean; fires: number; max?: number };
-type State = { jobs: Job[]; nextId: number };
-type AddOpts = { prompt: string; in?: string; at?: string; every?: string; cron?: string; if?: string; urgent?: boolean; max?: number; detached?: boolean };
+type Job = { id: number; prompt: string; next: number; every?: number; cron?: string; if?: string; urgent?: boolean; fresh?: boolean; fires: number; max?: number };
+type State = { jobs: Job[]; nextId: number; outbox?: { id: number; msg: string }[] };
+type AddOpts = { prompt: string; in?: string; at?: string; every?: string; cron?: string; if?: string; urgent?: boolean; fresh?: boolean; max?: number; detached?: boolean };
 const QUIET_MS = 60_000;
 
 const UNIT: Record<string, number> = { s: 1e3, m: 6e4, h: 3.6e6, d: 8.64e7 };
@@ -55,12 +56,14 @@ const nextCron = (expr: string, from = Date.now()) => {
 
 const describe = (j: Job) =>
 	`#${j.id} ${j.cron ? `cron ${j.cron}` : j.every ? `every ${j.every / 6e4}m` : "once"} ` +
-	`next ${new Date(j.next).toLocaleString()}${j.max ? ` (${j.fires}/${j.max})` : ""}${j.urgent ? " urgent" : ""}${j.if ? ` if \`${j.if}\`` : ""}: ${j.prompt}`;
+	`next ${new Date(j.next).toLocaleString()}${j.max ? ` (${j.fires}/${j.max})` : ""}${j.urgent ? " urgent" : ""}${j.fresh ? " fresh" : ""}${j.if ? ` if \`${j.if}\`` : ""}: ${j.prompt}`;
 
-const check = (cmd: string, cwd: string) =>
-	new Promise<{ ok: boolean; out: string }>((done) =>
-		exec(cmd, { cwd, shell: "/bin/bash", timeout: 120_000, maxBuffer: 1e6 }, (err, so, se) =>
-			done({ ok: !err, out: `${so}${se}`.trim().slice(-4000) })));
+const check = (cmd: string, cwd: string, timeout = 120_000) =>
+	new Promise<{ ok: boolean; out: string }>((done) => {
+		const child = exec(cmd, { cwd, shell: "/bin/bash", timeout, maxBuffer: 1e7 }, (err, so, se) =>
+			done({ ok: !err, out: `${so}${err ? se : ""}`.trim().slice(-4000) }));
+		child.stdin?.end(); // no input, so `pi -p` and friends don't wait on stdin
+	});
 
 // ---------- detached: systemd user timers ----------
 const UNITS = join(homedir(), ".config/systemd/user");
@@ -142,6 +145,10 @@ export default function (pi: ExtensionAPI) {
 	let tick: ReturnType<typeof setInterval> | undefined;
 	let ctx: ExtensionContext | undefined;
 	const busy = new Set<number>();
+	const deliver = (msg: string) => {
+		pi.sendUserMessage(msg, { deliverAs: "followUp" }); // starts a turn when idle, queues when busy
+		lastActivity = Date.now(); // one wake per quiet window
+	};
 	let lastActivity = Date.now();
 	const quiet = () => ctx?.isIdle() !== false && !ctx?.hasPendingMessages() && Date.now() - lastActivity >= QUIET_MS;
 
@@ -155,7 +162,7 @@ export default function (pi: ExtensionAPI) {
 		const every = o.every ? Math.max(dur(o.every), 6e4) : undefined;
 		const next = o.cron ? nextCron(o.cron) : o.at ? new Date(o.at).getTime() : Date.now() + (o.in ? dur(o.in) : every ?? NaN);
 		if (!Number.isFinite(next)) throw new Error("give one of: in, at, every, cron");
-		const job: Job = { id: s.nextId++, prompt: o.prompt, next, every, cron: o.cron, if: o.if, urgent: o.urgent, fires: 0, max: o.max };
+		const job: Job = { id: s.nextId++, prompt: o.prompt, next, every, cron: o.cron, if: o.if, urgent: o.urgent, fresh: o.fresh, fires: 0, max: o.max };
 		s.jobs.push(job);
 		save();
 		return describe(job);
@@ -178,14 +185,21 @@ export default function (pi: ExtensionAPI) {
 		busy.add(j.id);
 		const recurring = Boolean(j.every || j.cron);
 		let msg = `[timer #${j.id}${recurring ? `, run ${j.fires + 1}${j.max ? `/${j.max}` : ""}` : ""}] ${j.prompt}`;
-		const gate = j.if ? await check(j.if, ctx?.cwd ?? process.cwd()) : { ok: true, out: "" };
+		const cwd = ctx?.cwd ?? process.cwd();
+		const gate = j.if ? await check(j.if, cwd) : { ok: true, out: "" };
+		if (j.if && gate.ok) msg += `\n\n[check output]\n${gate.out}`;
+		if (gate.ok && j.fresh) {
+			// A throwaway pi with a clean context does the work; only its answer reaches this session.
+			const task = `${msg}\n\nIf there is nothing worth reporting, reply with exactly NOTHING.`;
+			const r = await check(`pi --no-session -p ${q(task)}`, cwd, 30 * 6e4);
+			gate.ok = !/^NOTHING\.?$/i.test(r.out.trim());
+			msg = `${msg}\n\n[fresh agent ${r.ok ? "answer" : "failed"}]\n${r.out}`;
+		}
 		busy.delete(j.id);
-		if (!s.jobs.includes(j)) return; // cancelled or session switched while checking
+		if (!s.jobs.includes(j)) return; // cancelled or session switched while working
 		if (gate.ok) {
-			if (!j.urgent && !quiet()) return; // you started talking during the check; stay due and retry later
-			if (j.if) msg += `\n\n[check output]\n${gate.out}`;
-			pi.sendUserMessage(msg, { deliverAs: "followUp" }); // starts a turn when idle, queues when busy
-			lastActivity = Date.now(); // one wake per quiet window
+			if (j.urgent || quiet()) deliver(msg);
+			else s.outbox = [...(s.outbox ?? []).filter((o) => o.id !== j.id), { id: j.id, msg }]; // wait for quiet; newest wins
 			j.fires++;
 		}
 		const now = Date.now();
@@ -202,7 +216,12 @@ export default function (pi: ExtensionAPI) {
 		c.ui.setStatus("pi-simple-scheduler", s.jobs.length ? `⏱ ${s.jobs.length}` : undefined);
 		tick ??= setInterval(() => {
 			const now = Date.now();
-			for (const j of s.jobs) if (j.next <= now && !busy.has(j.id) && (j.urgent || quiet())) void run(j);
+			if (s.outbox?.length && quiet()) {
+				deliver(s.outbox.shift()!.msg);
+				save();
+			}
+			// fresh jobs work in the background on time; the rest start only when the conversation is quiet
+			for (const j of s.jobs) if (j.next <= now && !busy.has(j.id) && (j.urgent || j.fresh || quiet())) void run(j);
 		}, 1000);
 		tick.unref?.(); // never keep `pi -p` alive
 	});
@@ -226,6 +245,8 @@ export default function (pi: ExtensionAPI) {
 			"Due prompts wait until the user and you have been quiet for 1 minute, so they never cut into a conversation; " +
 			"urgent: true skips that wait (use only when the user asked to be told right away). " +
 			"Optional: max (number of runs); if (shell command run first, wake only when it exits 0, its output is appended); " +
+			"fresh (true = a throwaway `pi -p` with a clean context does the prompt in the background, on time; you are woken " +
+			"with its answer only if it is not NOTHING, so checks cost this session nothing); " +
 			"detached (true = systemd timer that runs `pi -p` in a fresh session here, even with pi closed). " +
 			"list: show timers. cancel: id, detached name, or 'all'. " +
 			"For a self-paced loop, schedule a one-shot 'in' at the end of each run. For wait-until, use every + if + max 1. " +
@@ -242,6 +263,7 @@ export default function (pi: ExtensionAPI) {
 			if: Type.Optional(Type.String()),
 			detached: Type.Optional(Type.Boolean()),
 			urgent: Type.Optional(Type.Boolean()),
+			fresh: Type.Optional(Type.Boolean()),
 			id: Type.Optional(Type.String()),
 		}),
 		async execute(_id, p) {
